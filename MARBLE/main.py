@@ -1,4 +1,4 @@
-"""Main network"""
+
 
 import glob
 import os
@@ -24,15 +24,15 @@ class net(nn.Module):
     """MARBLE neural network.
 
     The possible parameters and their default values are described below,
-    and can be accessed via the `params` dictionnary in this class constructor.
+    and can be accessed via the `params` dictionary in this class constructor.
 
     Args:
         batch_size: batch size (default=64)
         epochs: optimisation epochs (default=20)
-        lr: iniital learning rate (default=0.01)
+        lr: initial learning rate (default=0.01)
         momentum: momentum (default=0.9)
         diffusion: set to True to use diffusion layer before gradient computation (default=False)
-        include_positions: include positions as features (warning: this is untested) (default=False)
+        include_positions: include positions as features (default=False)
         include_self: include vector at the center of feature (default=True)
         order: order to which to compute the directional derivatives (default=2)
         inner_product_features: transform gradient features to inner product features (default=True)
@@ -152,7 +152,7 @@ class net(nn.Module):
             assert p in list(self.params.keys()), f"Parameter {p} is not specified!"
 
     def reset_parameters(self):
-        """reset parmaeters."""
+        """Reset parameters."""
         for layer in self.children():
             if hasattr(layer, "reset_parameters"):
                 layer.reset_parameters()
@@ -164,11 +164,11 @@ class net(nn.Module):
         if "dim_man" in self.params.keys():
             s = d = self.params["dim_man"]
 
-        # diffusion
+        # diffusion (simplified: scalar diffusion only)
         self.diffusion = layers.Diffusion()
 
-        # gradient features
-        self.grad = nn.ModuleList(layers.AnisoConv() for i in range(o))
+        # gradient features (anisotropic convolution)
+        self.grad = nn.ModuleList(layers.AnisoConv() for _ in range(o))
 
         # cumulated number of channels after gradient features
         cum_channels = s * (1 - d ** (o + 1)) // (1 - d)
@@ -187,7 +187,7 @@ class net(nn.Module):
         if self.params["include_positions"]:
             cum_channels += d
 
-        # encoder
+        # encoder MLP
         if not isinstance(self.params["hidden_channels"], list):
             self.params["hidden_channels"] = [self.params["hidden_channels"]]
 
@@ -204,25 +204,23 @@ class net(nn.Module):
 
     def forward(self, data, n_id, adjs=None):
         """Forward pass.
-        Messages are passed to a set target nodes (current batch) from source
+
+        Messages are passed to a set of target nodes (current batch) from source
         nodes. The source nodes and target nodes form a bipartite graph to
         simplify message passing. By convention, the first size[1] entries of x
-        are the target nodes, i.e, x = concat[x_target, x_other]."""
+        are the target nodes, i.e, x = concat[x_target, x_other].
+        """
 
         x = data.x
         n, d = x.shape[0], data.gauges.shape[2]
         mask = data.mask
 
-        # diffusion
+        # --- simplified diffusion step: scalar diffusion using Laplacian spectrum ---
         if self.params["diffusion"]:
-            if hasattr(data, "Lc"):
-                x = geometry.global_to_local_frame(x, data.gauges)
-                x = self.diffusion(x, data.L, Lc=data.Lc, method="spectral")
-                x = geometry.global_to_local_frame(x, data.gauges, reverse=True)
-            else:
-                x = self.diffusion(x, data.L, method="spectral")
+            # only use scalar diffusion with L = (evals, evecs)
+            x = self.diffusion(x, data.L, method="spectral")
 
-        # local gauges
+        # local gauges (optional; mainly used if inner_product_features=True)
         if self.params["inner_product_features"]:
             x = geometry.global_to_local_frame(x, data.gauges)
 
@@ -237,7 +235,7 @@ class net(nn.Module):
         if self.params["vec_norm"]:
             x = F.normalize(x, dim=-1, p=2)
 
-        # gradients
+        # gradients via anisotropic convolution
         if self.params["include_self"]:
             out = [x]
         else:
@@ -256,7 +254,7 @@ class net(nn.Module):
         # take target nodes
         out = [o[: last_size[1]] for o in out]
 
-        # inner products
+        # inner products (optional)
         if self.params["inner_product_features"]:
             out = self.inner_products(out)
         else:
@@ -306,7 +304,6 @@ class net(nn.Module):
         Args:
             x : (nxdim) feature matrix
             loader : dataloader object from dataloader.py
-
         """
 
         if train:  # training mode (enables dropout in MLP)
@@ -444,10 +441,7 @@ class net(nn.Module):
         fname += timestamp
         fname += ".pth"
 
-        if best:
-            torch.save(checkpoint, os.path.join(outdir, fname))
-        else:
-            torch.save(checkpoint, os.path.join(outdir, fname))
+        torch.save(checkpoint, os.path.join(outdir, fname))
 
         return outdir
 
