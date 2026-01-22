@@ -1,4 +1,4 @@
-"""Preprocessing module."""
+
 
 import torch
 from torch_geometric.data import Batch
@@ -29,22 +29,20 @@ def construct_dataset(
     """Construct PyG dataset from node positions and features.
 
     Args:
-        pos: matrix with position of points
-        features: matrix with feature values for each point
-        labels: any additional data labels used for plotting only
+        anchor: matrix with positions of points
+        vector: matrix with feature values for each point
+        label: any additional data labels used for plotting only
         mask: boolean array, that will be forced to be close (default is None)
         graph_type: type of nearest-neighbours graph: cknn (default), knn or radius
         k: number of nearest-neighbours to construct the graph
-        delta: argument for cknn graph construction to decide the radius for each points.
+        delta: argument for cknn graph construction to decide the radius for each point
         frac_geodesic_nb: number of geodesic neighbours to fit the gauges to
-        to map to tangent space k*frac_geodesic_nb
-        stop_crit: stopping criterion for furthest point sampling
-        number_of_resamples: number of furthest point sampling runs to prevent bias (experimental)
+                          to map to tangent space k*frac_geodesic_nb
+        spacing: stopping criterion for furthest point sampling
+        number_of_resamples: number of furthest point sampling runs to prevent bias
         var_explained: fraction of variance explained by the local gauges
-        local_gauges: is True, it will try to compute local gauges if it can (signal dim is > 2,
-            embedding dimension is > 2 or dim embedding is not dim of manifold)
+        local_gauges: if True, it will try to compute local gauges if it can
         seed: Specify for reproducibility in the furthest point sampling.
-              The default is None, which means a random starting vertex.
         metric: metric used to fit proximity graph
         number_of_eigenvectors: int number of eigenvectors to use. Default: None, meaning use all.
     """
@@ -132,33 +130,20 @@ def _compute_geometric_objects(
     number_of_eigenvectors=None,
 ):
     """
-    Compute geometric objects used later: local gauges, Levi-Civita connections
-    gradient kernels, scalar and connection laplacians.
+    Compute geometric objects used later: local gauges,
+    gradient kernels, and scalar Laplacian spectrum.
 
-    Args:
-        data: pytorch geometric data object
-        n_geodesic_nb: number of geodesic neighbours to fit the tangent spaces to
-        var_explained: fraction of variance explained by the local gauges
-        local_gauges: whether to use local or global gauges
-        number_of_eigenvectors: int number of eigenvectors to use. Default: None, meaning use all.
-
-    Returns:
-        data: pytorch geometric data object with the following new attributes
-        kernels (list of d (nxn) matrices): directional kernels
-        L (nxn matrix): scalar laplacian
-        Lc (ndxnd matrix): connection laplacian
-        gauges (nxdxd): local gauges at all points
-        par (dict): updated dictionary of parameters
-        local_gauges: whether to use local gauges
-
+    In the simplified version:
+    - we do NOT compute the connection Laplacian `Lc`
+    - only scalar Laplacian eigen-decomposition is used.
     """
+
     n, dim_emb = data.pos.shape
     dim_signal = data.x.shape[1]
     print(f"\n---- Embedding dimension: {dim_emb}", end="")
     print(f"\n---- Signal dimension: {dim_signal}", end="")
 
-    # disable vector computations if 1) signal is scalar or 2) embedding dimension
-    # is <= 2. In case 2), either M=R^2 (manifold is whole space) or case 1).
+    # disable vector manifold computations in simple cases
     if dim_signal == 1:
         print("\nSignal dimension is 1, so manifold computations are disabled!")
         local_gauges = False
@@ -168,38 +153,38 @@ def _compute_geometric_objects(
     if dim_emb != dim_signal:
         print("\nEmbedding dimension /= signal dimension, so manifold computations are disabled!")
 
+    # gauges: either local (if enabled) or global identity frames
     if local_gauges:
         try:
             gauges, Sigma = g.compute_gauges(data, n_geodesic_nb=n_geodesic_nb)
-        except Exception as exc:
+        except Exception as exc:  # pylint: disable=broad-exception-caught
             raise Exception(
-                "\nCould not compute gauges (possibly data is too sparse or the \
-                  number of neighbours is too small)"
+                "\nCould not compute gauges (possibly data is too sparse or the "
+                "number of neighbours is too small)"
             ) from exc
     else:
         gauges = torch.eye(dim_emb).repeat(n, 1, 1)
+        Sigma = None
 
+    # scalar Laplacian
     L = g.compute_laplacian(data)
 
-    if local_gauges:
+    # directional kernels and (optionally) manifold dimension
+    if local_gauges and Sigma is not None:
         data.dim_man = g.manifold_dimension(Sigma, frac_explained=var_explained)
         print(f"---- Manifold dimension: {data.dim_man}")
 
         gauges = gauges[:, :, : data.dim_man]
-        R = g.compute_connections(data, gauges)
 
         print("\n---- Computing kernels ... ", end="")
         kernels = g.gradient_op(data.pos, data.edge_index, gauges)
-        kernels = [utils.tile_tensor(K, data.dim_man) for K in kernels]
-        kernels = [K * R for K in kernels]
-
-        Lc = g.compute_connection_laplacian(data, R)
-
+        # in the simplified version we keep kernels as-is (no connection Laplacian)
     else:
         print("\n---- Computing kernels ... ", end="")
         kernels = g.gradient_op(data.pos, data.edge_index, gauges)
-        Lc = None
+        data.dim_man = None
 
+    # Laplacian spectrum
     if number_of_eigenvectors is None:
         print(
             """\n---- Computing full spectrum ...
@@ -212,12 +197,17 @@ def _compute_geometric_objects(
             f"\n---- Computing spectrum with {number_of_eigenvectors} eigenvectors...",
             end="",
         )
-    L = g.compute_eigendecomposition(L, k=number_of_eigenvectors)
-    Lc = g.compute_eigendecomposition(Lc, k=number_of_eigenvectors)
 
+    L = g.compute_eigendecomposition(L, k=number_of_eigenvectors)
+
+    # store results in data object
     data.kernels = [
-        utils.to_SparseTensor(K.coalesce().indices(), value=K.coalesce().values()) for K in kernels
+        utils.to_SparseTensor(K.coalesce().indices(), value=K.coalesce().values())
+        for K in kernels
     ]
-    data.L, data.Lc, data.gauges, data.local_gauges = L, Lc, gauges, local_gauges
+    data.L = L
+    data.gauges = gauges
+    data.local_gauges = local_gauges
+    data.Lc = None  # explicit: no connection Laplacian in simplified version
 
     return data
