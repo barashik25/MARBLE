@@ -1,63 +1,49 @@
-"""Smoothing module."""
-
 import torch
 
 
-def scalar_diffusion(x, t, method="matrix_exp", par=None):
-    """Scalar diffusion."""
+def scalar_diffusion(x, t, method="spectral", par=None):
+    """
+    Scalar diffusion: smooths scalar signals over the graph.
+    Uses spectral formulation: exp(-t*Lambda) * U^T x.
+    
+    x : (n x 1) or (n x C)
+    par: (eigenvalues, eigenvectors)
+    """
+
     if len(x.shape) == 1:
         x = x.unsqueeze(1)
 
-    if method == "matrix_exp":
-        if par.is_sparse:
-            par = par.to_dense()
-        return torch.matrix_exp(-t * par.to_dense()).mm(x)
+    # Only spectral method is supported in simplified version
+    assert method == "spectral", "Only spectral method is supported in simplified version."
+    assert isinstance(par, (list, tuple)) and len(par) == 2, "par must be (eigenvalues, eigenvectors)."
 
-    if method == "spectral":
-        assert (
-            isinstance(par, (list, tuple)) and len(par) == 2
-        ), "For spectral method, par must be a tuple of \
-            eigenvalues, eigenvectors!"
-        evals, evecs = par
+    evals, evecs = par
 
-        # Transform to spectral
-        x_spec = torch.mm(evecs.T, x)
+    # project into spectral domain
+    x_spec = evecs.T @ x
 
-        # Diffuse
-        diffusion_coefs = torch.exp(-evals.unsqueeze(-1) * t.unsqueeze(0))
-        x_diffuse_spec = diffusion_coefs * x_spec
+    # apply diffusion coefficients exp(-t*lambda)
+    diff_coef = torch.exp(-evals.unsqueeze(-1) * t)
 
-        # Transform back to per-vertex
-        return evecs.mm(x_diffuse_spec)
+    # diffuse in spectral domain
+    x_diff = diff_coef * x_spec
 
-    raise NotImplementedError
+    # project back to spatial domain
+    return evecs @ x_diff
 
 
-def vector_diffusion(x, t, Lc, L=None, method="spectral", normalise=True):
-    """Vector diffusion."""
-    n, d = x.shape[0], x.shape[1]
+def vector_diffusion(x, t, Lc, L=None, method="spectral", normalise=False):
+    """
+    Vector diffusion simplified:
+    - No parallel transport
+    - No normalisation
+    - Simply reshapes and applies scalar diffusion
 
-    if method == "spectral":
-        assert len(Lc) == 2, "Lc must be a tuple of eigenvalues, eigenvectors!"
-        nd = Lc[1].shape[0]
-    else:
-        nd = Lc.shape[0]
+    x: (n x d)
+    """
+    n, d = x.shape
+    assert method == "spectral", "Only spectral method is supported."
 
-    assert (
-        n * d % nd
-    ) == 0, "Data dimension must be an integer multiple of the dimensions \
-         of the connection Laplacian!"
-
-    # vector diffusion with connection Laplacian
-    out = x.view(nd, -1)
+    out = x.view(-1, 1)
     out = scalar_diffusion(out, t, method, Lc)
-    out = out.view(x.shape)
-
-    if normalise:
-        assert L is not None, "Need Laplacian for normalised diffusion!"
-        x_abs = x.norm(dim=-1, p=2, keepdim=True)
-        out_abs = scalar_diffusion(x_abs, t, method, L)
-        ind = scalar_diffusion(torch.ones(x.shape[0], 1).to(x.device), t, method, L)
-        out = out * out_abs / (ind * out.norm(dim=-1, p=2, keepdim=True))
-
-    return out
+    return out.view(n, d)
